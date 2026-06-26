@@ -20,9 +20,14 @@ public:
 	std::unique_ptr<VictusFanControl> fan_control;
 	std::unique_ptr<VictusKeyboardControl> keyboard_control;
 
+	bool is_dark_theme = false;
+	GtkCssProvider *css_provider = nullptr;
+
 	VictusControl()
 	{
-		load_css();
+		load_theme_preference();
+		css_provider = gtk_css_provider_new();
+		load_css(is_dark_theme);
 
 		socket_client = std::make_shared<VictusSocketClient>("/run/victus-control/victus_backend.sock");
 		fan_control = std::make_unique<VictusFanControl>(socket_client);
@@ -41,17 +46,44 @@ public:
 		GtkWidget *title_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 		gtk_widget_add_css_class(title_bar, "title-bar");
 
-		// Title label
+		// Theme toggle button (left side)
+		GtkWidget *theme_btn = gtk_button_new();
+		gtk_button_set_has_frame(GTK_BUTTON(theme_btn), FALSE);
+		gtk_widget_set_size_request(theme_btn, 40, 40);
+		gtk_button_set_label(GTK_BUTTON(theme_btn), "☀");
+		gtk_widget_add_css_class(theme_btn, "victus-title-btn");
+		g_signal_connect(theme_btn, "realize", G_CALLBACK(+[](GtkWidget *w, gpointer)
+		{
+			GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(w));
+			if (surface) gdk_surface_set_cursor(surface, gdk_cursor_new_from_name("pointer", nullptr));
+		}), nullptr);
+		g_signal_connect(theme_btn, "clicked", G_CALLBACK(+[](GtkWidget *btn, gpointer data)
+		{
+			VictusControl *self = static_cast<VictusControl*>(data);
+			self->is_dark_theme = !self->is_dark_theme;
+			gtk_button_set_label(GTK_BUTTON(btn), self->is_dark_theme ? "☾" : "☀");
+			self->load_css(self->is_dark_theme);
+			self->save_theme_preference();
+		}), this);
+		gtk_box_append(GTK_BOX(title_bar), theme_btn);
+
+		// Title label (centered)
 		GtkWidget *title_label = gtk_label_new("victus-control");
 		gtk_widget_add_css_class(title_label, "title-label");
 		gtk_widget_set_hexpand(title_label, TRUE);
-		gtk_widget_set_halign(title_label, GTK_ALIGN_START);
+		gtk_widget_set_halign(title_label, GTK_ALIGN_CENTER);
 		gtk_box_append(GTK_BOX(title_bar), title_label);
 
-		// Close button
+		// Close button (right side)
 		GtkWidget *close_btn = gtk_button_new();
+		gtk_widget_set_size_request(close_btn, 32, 32);
 		gtk_button_set_icon_name(GTK_BUTTON(close_btn), "window-close-symbolic");
 		gtk_widget_add_css_class(close_btn, "victus-title-btn");
+		g_signal_connect(close_btn, "realize", G_CALLBACK(+[](GtkWidget *w, gpointer)
+		{
+			GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(w));
+			if (surface) gdk_surface_set_cursor(surface, gdk_cursor_new_from_name("pointer", nullptr));
+		}), nullptr);
 		g_signal_connect_swapped(close_btn, "clicked", G_CALLBACK(gtk_window_destroy), window);
 		gtk_box_append(GTK_BOX(title_bar), close_btn);
 
@@ -75,167 +107,89 @@ public:
 
 	~VictusControl()
 	{
+		if (css_provider) g_object_unref(css_provider);
 	}
 
-	void load_css()
+	void load_css(bool dark)
 	{
-		GtkCssProvider *provider = gtk_css_provider_new();
-		const char *css =
-			"/* Dark theme */\n"
-			"\n"
-			"* {\n"
-			"  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;\n"
-			"}\n"
-			"\n"
-			".app-window {\n"
-			"  background-color: #0d1117;\n"
-			"}\n"
-			"\n"
-			".main-box {\n"
-			"  background-color: #0d1117;\n"
-			"  padding: 24px 32px;\n"
-			"}\n"
-			"\n"
-			"/* Title bar */\n"
-			".title-bar {\n"
-			"  background-color: #0d1117;\n"
-			"  border-bottom: 1px solid #21262d;\n"
-			"  padding: 6px 12px;\n"
-			"  min-height: 36px;\n"
-			"}\n"
-			"\n"
-			".title-label {\n"
-			"  color: #c9d1d9;\n"
-			"  font-weight: 700;\n"
-			"  font-size: 14px;\n"
-			"  padding: 0 8px;\n"
-			"}\n"
-			"\n"
-			"victus-title-btn {\n"
-			"  background-color: #21262d !important;\n"
-			"  border: none;\n"
-			"  border-radius: 6px;\n"
-			"  padding: 6px;\n"
-			"  min-width: 32px;\n"
-			"  min-height: 32px;\n"
-			"  color: #8b949e;\n"
-			"}\n"
-			"\n"
-			"victus-title-btn:hover {\n"
-			"  background-color: #30363d !important;\n"
-			"  color: #c9d1d9;\n"
-			"}\n"
-			"\n"
-			"victus-title-btn.close-btn:hover {\n"
-			"  background-color: #f85149 !important;\n"
-			"  color: #ffffff;\n"
-			"}\n"
-			"\n"
-			"/* Card container */\n"
-			".card {\n"
-			"  background-color: #161b22;\n"
-			"  border: 1px solid #21262d;\n"
-			"  border-radius: 8px;\n"
-			"  padding: 20px 24px;\n"
-			"  margin: 8px 0;\n"
-			"}\n"
-			"\n"
-			"/* Card title */\n"
-			".card-title {\n"
-			"  color: #c9d1d9;\n"
-			"  font-size: 14px;\n"
-			"  font-weight: 700;\n"
-			"  margin-bottom: 16px;\n"
-			"  letter-spacing: 0.3px;\n"
-			"}\n"
-			"\n"
-			"/* Fan mode buttons */\n"
-			"button {\n"
-			"  min-height: 44px;\n"
-			"  border-radius: 8px;\n"
-			"  font-size: 15px;\n"
-			"  font-weight: 700;\n"
-			"  padding: 10px 24px;\n"
-			"  border: 2px solid #30363d !important;\n"
-			"  transition: all 150ms ease;\n"
-			"  background-color: #21262d !important;\n"
-			"  color: #ffffff !important;\n"
-			"}\n"
-			"\n"
-			"button.active {\n"
-			"  background-color: #1f6feb !important;\n"
-			"  color: #ffffff !important;\n"
-			"  border-color: #1f6feb !important;\n"
-			"}\n"
-			"\n"
-			"button.inactive {\n"
-			"  background-color: #21262d !important;\n"
-			"  color: #8b949e !important;\n"
-			"  border-color: #30363d !important;\n"
-			"}\n"
-			"\n"
-			"button.inactive:hover {\n"
-			"  border-color: #58a6ff !important;\n"
-			"  color: #c9d1d9 !important;\n"
-			"}\n"
-			"\n"
-			"/* Status labels */\n"
-			".status-label {\n"
-			"  color: #8b949e;\n"
-			"  font-size: 13px;\n"
-			"}\n"
-			"\n"
-			".status-value {\n"
-			"  color: #c9d1d9;\n"
-			"  font-weight: 600;\n"
-			"  font-size: 14px;\n"
-			"}\n"
-			"\n"
-			".status-value.on {\n"
-			"  color: #3fb950;\n"
-			"}\n"
-			"\n"
-			".status-value.off {\n"
-			"  color: #f85149;\n"
-			"}\n"
-			"\n"
-			".status-value.max {\n"
-			"  color: #d29922;\n"
-			"}\n"
-			"\n"
-			".status-value.auto {\n"
-			"  color: #58a6ff;\n"
-			"}\n"
-			"\n"
-			"/* Fan speed display */\n"
-			".fan-speed {\n"
-			"  background-color: #0d1117;\n"
-			"  border: 1px solid #21262d;\n"
-			"  border-radius: 6px;\n"
-			"  padding: 12px 16px;\n"
-			"  margin: 4px 0;\n"
-			"}\n"
-			"\n"
-			".fan-speed-label {\n"
-			"  color: #8b949e;\n"
-			"  font-size: 12px;\n"
-			"  font-weight: 500;\n"
-			"}\n"
-			"\n"
-			".fan-speed-value {\n"
-			"  color: #c9d1d9;\n"
-			"  font-size: 18px;\n"
-			"  font-weight: 700;\n"
-			"  font-family: monospace;\n"
-			"}\n"
-			"";
+		if (!css_provider) css_provider = gtk_css_provider_new();
 
-		gtk_css_provider_load_from_string(provider, css);
-		gtk_style_context_add_provider_for_display(
-			gdk_display_get_default(),
-			GTK_STYLE_PROVIDER(provider),
-			GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-		g_object_unref(provider);
+		const char *light_css =
+			"* { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }\n"
+			".app-window { background-color: #ffffff; }\n"
+			".main-box { background-color: #ffffff; padding: 24px 32px; }\n"
+			".title-bar { background-color: #ffffff; border-bottom: 1px solid #d0d7de; padding: 6px 12px; min-height: 36px; }\n"
+			".title-label { color: #1f2328; font-weight: 700; font-size: 14px; padding: 0 8px; }\n"
+			"victus-title-btn { cursor: pointer; background-color: #f6f8fa !important; border: none; border-radius: 6px; padding: 6px; min-width: 32px; min-height: 32px; color: #ffffff; font-size: 18px; }\n"
+			"victus-title-btn:hover { background-color: #eaeef2 !important; color: #ffffff; }\n"
+			"victus-title-btn.close-btn:hover { background-color: #cf222e !important; color: #ffffff; }\n"
+			".card { background-color: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 20px 24px; margin: 8px 0; }\n"
+			".card-title { color: #1f2328; font-size: 14px; font-weight: 700; margin-bottom: 16px; letter-spacing: 0.3px; }\n"
+			"button { cursor: pointer; min-height: 44px; border-radius: 8px; font-size: 15px; font-weight: 700; padding: 10px 24px; border: 2px solid #d0d7de !important; transition: all 150ms ease; background-color: #ffffff !important; color: #1f2328 !important; }\n"
+			"button.active { background-color: #0969da !important; color: #ffffff !important; border-color: #0969da !important; }\n"
+			"button.inactive { background-color: #f6f8fa !important; color: #656d76 !important; border-color: #d0d7de !important; }\n"
+			"button.inactive:hover { border-color: #0969da !important; color: #1f2328 !important; }\n"
+			".status-label { color: #656d76; font-size: 13px; }\n"
+			".status-value { color: #1f2328; font-weight: 600; font-size: 14px; }\n"
+			".status-value.on { color: #1a7f37; }\n"
+			".status-value.off { color: #cf222e; }\n"
+			".status-value.max { color: #9a6700; }\n"
+			".status-value.auto { color: #0969da; }\n"
+			".fan-speed { background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; padding: 12px 16px; margin: 4px 0; }\n"
+			".fan-speed-label { color: #656d76; font-size: 12px; font-weight: 500; }\n"
+			".fan-speed-value { color: #1f2328; font-size: 18px; font-weight: 700; font-family: monospace; }\n";
+
+		const char *dark_css =
+			"* { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }\n"
+			".app-window { background-color: #0d1117; }\n"
+			".main-box { background-color: #0d1117; padding: 24px 32px; }\n"
+			".title-bar { background-color: #0d1117; border-bottom: 1px solid #21262d; padding: 6px 12px; min-height: 36px; }\n"
+			".title-label { color: #c9d1d9; font-weight: 700; font-size: 14px; padding: 0 8px; }\n"
+			"victus-title-btn { cursor: pointer; background-color: #21262d !important; border: none; border-radius: 6px; padding: 6px; min-width: 32px; min-height: 32px; color: #ffffff; font-size: 18px; }\n"
+			"victus-title-btn:hover { background-color: #30363d !important; color: #ffffff; }\n"
+			"victus-title-btn.close-btn:hover { background-color: #f85149 !important; color: #ffffff; }\n"
+			".card { background-color: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 20px 24px; margin: 8px 0; }\n"
+			".card-title { color: #c9d1d9; font-size: 14px; font-weight: 700; margin-bottom: 16px; letter-spacing: 0.3px; }\n"
+			"button { cursor: pointer; min-height: 44px; border-radius: 8px; font-size: 15px; font-weight: 700; padding: 10px 24px; border: 2px solid #30363d !important; transition: all 150ms ease; background-color: #21262d !important; color: #ffffff !important; }\n"
+			"button.active { background-color: #1f6feb !important; color: #ffffff !important; border-color: #1f6feb !important; }\n"
+			"button.inactive { background-color: #21262d !important; color: #8b949e !important; border-color: #30363d !important; }\n"
+			"button.inactive:hover { border-color: #58a6ff !important; color: #c9d1d9 !important; }\n"
+			".status-label { color: #8b949e; font-size: 13px; }\n"
+			".status-value { color: #c9d1d9; font-weight: 600; font-size: 14px; }\n"
+			".status-value.on { color: #3fb950; }\n"
+			".status-value.off { color: #f85149; }\n"
+			".status-value.max { color: #d29922; }\n"
+			".status-value.auto { color: #58a6ff; }\n"
+			".fan-speed { background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 12px 16px; margin: 4px 0; }\n"
+			".fan-speed-label { color: #8b949e; font-size: 12px; font-weight: 500; }\n"
+			".fan-speed-value { color: #c9d1d9; font-size: 18px; font-weight: 700; font-family: monospace; }\n";
+
+		const char *css = dark ? dark_css : light_css;
+		gtk_css_provider_load_from_string(css_provider, css);
+		GdkDisplay *display = gdk_display_get_default();
+		gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+	}
+
+	void save_theme_preference()
+	{
+		const char *home = g_get_home_dir();
+		if (!home) return;
+		std::string dir = std::string(home) + "/.config/victus-control";
+		g_mkdir_with_parents(dir.c_str(), 0700);
+		std::ofstream file(dir + "/settings");
+		if (file) file << (is_dark_theme ? "dark" : "light") << std::endl;
+	}
+
+	void load_theme_preference()
+	{
+		const char *home = g_get_home_dir();
+		if (!home) return;
+		std::string path = std::string(home) + "/.config/victus-control/settings";
+		std::ifstream file(path);
+		std::string mode;
+		if (file && std::getline(file, mode)) {
+			is_dark_theme = (mode == "dark");
+		}
 	}
 
 	void build_ui()
@@ -274,17 +228,12 @@ int main(int argc, char *argv[])
 		VictusControl app;
 		app.run();
 	} catch (const std::exception &e) {
-		std::cerr << "An unhandled exception occurred: " << e.what() << std::endl;
-
-		GtkAlertDialog *dialog = gtk_alert_dialog_new(
-			"An error occurred: %s",
-			e.what()
-		);
+		std::cerr << "An error occurred: " << e.what() << std::endl;
+		GtkAlertDialog *dialog = gtk_alert_dialog_new("An error occurred: %s", e.what());
 		gtk_alert_dialog_set_detail(dialog, "victus-control encountered an unexpected error and must close.");
 		gtk_alert_dialog_show(dialog, nullptr);
 		return 1;
 	}
-
 
 	return 0;
 }
