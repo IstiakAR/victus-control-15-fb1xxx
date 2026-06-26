@@ -42,12 +42,7 @@ void on_client_disconnected() {
   std::cout << "Client disconnected (active: " << current << ")" << std::endl;
 
   if (current == 0) {
-    auto result = ensure_better_auto_mode();
-    if (result != "OK") {
-      std::cerr
-          << "Failed to enforce BETTER_AUTO mode after client disconnect: "
-          << result << std::endl;
-    }
+    std::cout << "All clients disconnected" << std::endl;
   }
 }
 
@@ -184,8 +179,6 @@ void handle_command(const std::string &command_str, int client_socket) {
     } else {
       std::string mode = normalize_mode(remainder);
       response = set_fan_mode(mode);
-      if (response == "OK")
-        fan_mode_trigger(mode);
     }
   } else if (command == "GET_FAN_MODE") {
     if (!has_extra_tokens(ss)) {
@@ -337,11 +330,6 @@ int main() {
 
   std::cout << "Server is listening..." << std::endl;
 
-  auto ensure_result = ensure_better_auto_mode();
-  if (ensure_result != "OK") {
-    std::cerr << "Failed to enforce initial BETTER_AUTO mode: " << ensure_result
-              << std::endl;
-  }
 
   while (server_running.load(std::memory_order_acquire)) {
     int client_socket = accept(server_socket, nullptr, nullptr);

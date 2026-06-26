@@ -7,54 +7,98 @@
 #include <cmath>
 #include <algorithm>
 
-// Constants for manual fan control
-const int MIN_RPM = 2000;
-const int FAN1_MAX_RPM = 5800;
-const int FAN2_MAX_RPM = 6100;
-const int RPM_STEPS = 8;
-
 VictusFanControl::VictusFanControl(std::shared_ptr<VictusSocketClient> client) : socket_client(client)
 {
-    fan_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 20);
-    gtk_widget_set_margin_top(fan_page, 20);
-    gtk_widget_set_margin_bottom(fan_page, 20);
-    gtk_widget_set_margin_start(fan_page, 20);
-    gtk_widget_set_margin_end(fan_page, 20);
+    fan_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(fan_page, "page-container");
 
-    // --- Mode Selector ---
-    mode_selector = gtk_combo_box_text_new();
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(mode_selector), "AUTO", "AUTO");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(mode_selector), "BETTER_AUTO", "Better Auto");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(mode_selector), "MANUAL", "MANUAL");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(mode_selector), "MAX", "MAX");
-    g_signal_connect(mode_selector, "changed", G_CALLBACK(on_mode_changed), this);
-    gtk_box_append(GTK_BOX(fan_page), mode_selector);
+    // --- Card 1: Mode Selector ---
+    GtkWidget *mode_card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+    gtk_widget_add_css_class(mode_card, "card");
 
-    // --- Speed Slider ---
-    slider_label = gtk_label_new("Manual Speed Control (1-8)");
-    gtk_widget_set_halign(slider_label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(fan_page), slider_label);
+    GtkWidget *mode_title = gtk_label_new("Fan Mode");
+    gtk_widget_add_css_class(mode_title, "card-title");
+    gtk_widget_set_halign(mode_title, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(mode_card), mode_title);
 
-    speed_slider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, RPM_STEPS, 1);
-    gtk_scale_set_draw_value(GTK_SCALE(speed_slider), TRUE);
-    g_signal_connect(speed_slider, "value-changed", G_CALLBACK(on_speed_slider_changed), this);
-    gtk_box_append(GTK_BOX(fan_page), speed_slider);
+    // Button row: side by side, equal width
+    GtkWidget *btn_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_box_set_homogeneous(GTK_BOX(btn_row), TRUE);
+    gtk_widget_set_hexpand(btn_row, TRUE);
 
-    // --- Status Labels ---
-    state_label = gtk_label_new("Current State: N/A");
-    gtk_widget_set_halign(state_label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(fan_page), state_label);
+    // Auto button
+    auto_btn = gtk_button_new_with_label("AUTO");
+    gtk_widget_add_css_class(auto_btn, "active");
+    g_signal_connect(auto_btn, "clicked", G_CALLBACK(on_auto_clicked), this);
+    gtk_box_append(GTK_BOX(btn_row), auto_btn);
 
-    fan1_speed_label = gtk_label_new("Fan 1 Speed: N/A RPM");
+    // Max button
+    max_btn = gtk_button_new_with_label("MAX");
+    gtk_widget_add_css_class(max_btn, "inactive");
+    g_signal_connect(max_btn, "clicked", G_CALLBACK(on_max_clicked), this);
+    gtk_box_append(GTK_BOX(btn_row), max_btn);
+    gtk_box_append(GTK_BOX(mode_card), btn_row);
+
+    // --- Status row ---
+    GtkWidget *mode_status_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(mode_status_row, GTK_ALIGN_START);
+
+    GtkWidget *mode_status_label = gtk_label_new("Current Mode:");
+    gtk_widget_add_css_class(mode_status_label, "status-label");
+
+    state_label = gtk_label_new("---");
+    gtk_widget_add_css_class(state_label, "status-value");
+    gtk_widget_add_css_class(state_label, "auto");
+
+    gtk_box_append(GTK_BOX(mode_status_row), mode_status_label);
+    gtk_box_append(GTK_BOX(mode_status_row), state_label);
+    gtk_box_append(GTK_BOX(mode_card), mode_status_row);
+
+    gtk_box_append(GTK_BOX(fan_page), mode_card);
+
+    // --- Card 2: Fan Speeds ---
+    GtkWidget *speed_card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+    gtk_widget_add_css_class(speed_card, "card");
+
+    GtkWidget *speed_title = gtk_label_new("Fan Speeds");
+    gtk_widget_add_css_class(speed_title, "card-title");
+    gtk_widget_set_halign(speed_title, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(speed_card), speed_title);
+
+    // Fan 1 speed
+    GtkWidget *fan1_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_add_css_class(fan1_box, "fan-speed");
+
+    GtkWidget *fan1_label = gtk_label_new("Fan 1");
+    gtk_widget_add_css_class(fan1_label, "fan-speed-label");
+    gtk_widget_set_halign(fan1_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(fan1_box), fan1_label);
+
+    fan1_speed_label = gtk_label_new("N/A RPM");
+    gtk_widget_add_css_class(fan1_speed_label, "fan-speed-value");
     gtk_widget_set_halign(fan1_speed_label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(fan_page), fan1_speed_label);
+    gtk_box_append(GTK_BOX(fan1_box), fan1_speed_label);
 
-    fan2_speed_label = gtk_label_new("Fan 2 Speed: N/A RPM");
+    gtk_box_append(GTK_BOX(speed_card), fan1_box);
+
+    // Fan 2 speed
+    GtkWidget *fan2_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_add_css_class(fan2_box, "fan-speed");
+
+    GtkWidget *fan2_label = gtk_label_new("Fan 2");
+    gtk_widget_add_css_class(fan2_label, "fan-speed-label");
+    gtk_widget_set_halign(fan2_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(fan2_box), fan2_label);
+
+    fan2_speed_label = gtk_label_new("N/A RPM");
+    gtk_widget_add_css_class(fan2_speed_label, "fan-speed-value");
     gtk_widget_set_halign(fan2_speed_label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(fan_page), fan2_speed_label);
+    gtk_box_append(GTK_BOX(fan2_box), fan2_speed_label);
 
-    // Initial UI state update
-    update_ui_from_system_state();
+    gtk_box_append(GTK_BOX(speed_card), fan2_box);
+
+    gtk_box_append(GTK_BOX(fan_page), speed_card);
+
     update_fan_speeds();
 
     // Set up a timer to periodically update fan speeds
@@ -69,34 +113,48 @@ GtkWidget* VictusFanControl::get_page()
     return fan_page;
 }
 
+void VictusFanControl::set_mode(const std::string &mode)
+{
+    auto result = socket_client->send_command_async(SET_FAN_MODE, mode).get();
+    if (result != "OK") {
+        std::cerr << "Failed to set fan mode: " << result << std::endl;
+    }
+    update_ui_from_system_state();
+}
+
 void VictusFanControl::update_ui_from_system_state()
 {
     auto response = socket_client->send_command_async(GET_FAN_MODE);
     std::string fan_mode = response.get();
 
     if (fan_mode.find("ERROR") != std::string::npos) {
-        fan_mode = "AUTO"; // Default to AUTO on error
+        fan_mode = "AUTO";
         std::cerr << "Failed to get fan mode, defaulting to AUTO." << std::endl;
     }
 
-    gtk_label_set_text(GTK_LABEL(state_label), ("Current State: " + fan_mode).c_str());
 
-    if (fan_mode == "MANUAL") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "MANUAL");
-        gtk_widget_set_sensitive(speed_slider, TRUE);
-        gtk_widget_set_sensitive(slider_label, TRUE);
-    } else if (fan_mode == "BETTER_AUTO") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "BETTER_AUTO");
-        gtk_widget_set_sensitive(speed_slider, FALSE);
-        gtk_widget_set_sensitive(slider_label, FALSE);
-    } else if (fan_mode == "MAX") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "MAX");
-        gtk_widget_set_sensitive(speed_slider, FALSE);
-        gtk_widget_set_sensitive(slider_label, FALSE);
+    // Update state label
+    gtk_label_set_text(GTK_LABEL(state_label), fan_mode.c_str());
+
+    // Remove all mode classes
+    gtk_widget_remove_css_class(state_label, "auto");
+    gtk_widget_remove_css_class(state_label, "max");
+    gtk_widget_remove_css_class(state_label, "on");
+    gtk_widget_remove_css_class(state_label, "off");
+
+    // Update button states
+    if (fan_mode == "MAX") {
+        gtk_widget_add_css_class(auto_btn, "inactive");
+        gtk_widget_remove_css_class(auto_btn, "active");
+        gtk_widget_add_css_class(max_btn, "active");
+        gtk_widget_remove_css_class(max_btn, "inactive");
+        gtk_widget_add_css_class(state_label, "max");
     } else { // AUTO
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "AUTO");
-        gtk_widget_set_sensitive(speed_slider, FALSE);
-        gtk_widget_set_sensitive(slider_label, FALSE);
+        gtk_widget_add_css_class(auto_btn, "active");
+        gtk_widget_remove_css_class(auto_btn, "inactive");
+        gtk_widget_add_css_class(max_btn, "inactive");
+        gtk_widget_remove_css_class(max_btn, "active");
+        gtk_widget_add_css_class(state_label, "auto");
     }
 }
 
@@ -110,104 +168,17 @@ void VictusFanControl::update_fan_speeds()
     std::string fan2_speed = response2.get();
     if (fan2_speed.find("ERROR") != std::string::npos) fan2_speed = "N/A";
 
-    gtk_label_set_text(GTK_LABEL(fan1_speed_label), ("Fan 1 Speed: " + fan1_speed + " RPM").c_str());
-    gtk_label_set_text(GTK_LABEL(fan2_speed_label), ("Fan 2 Speed: " + fan2_speed + " RPM").c_str());
+    gtk_label_set_text(GTK_LABEL(fan1_speed_label), (fan1_speed + " RPM").c_str());
+    gtk_label_set_text(GTK_LABEL(fan2_speed_label), (fan2_speed + " RPM").c_str());
 }
 
-void VictusFanControl::set_fan_rpm(int level)
+void VictusFanControl::on_auto_clicked(GtkButton *button, gpointer data)
 {
-    if (level < 1 || level > RPM_STEPS) return;
-
-    auto compute_rpm = [](int lvl, int max_rpm) {
-        if (RPM_STEPS <= 1) {
-            return max_rpm;
-        }
-        double step = static_cast<double>(max_rpm - MIN_RPM) / static_cast<double>(RPM_STEPS - 1);
-        double value = static_cast<double>(MIN_RPM) + static_cast<double>(lvl - 1) * step;
-        int rpm = static_cast<int>(std::round(value));
-        rpm = std::clamp(rpm, MIN_RPM, max_rpm);
-        return rpm;
-    };
-
-    int fan1_rpm = compute_rpm(level, FAN1_MAX_RPM);
-    int fan2_rpm = compute_rpm(level, FAN2_MAX_RPM);
-
-    std::string fan1_rpm_str = std::to_string(fan1_rpm);
-    std::string fan2_rpm_str = std::to_string(fan2_rpm);
-    unsigned long long generation =
-        manual_request_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-    // Apply fan 1 immediately, but only let the newest request schedule fan 2
-    // after the firmware-required delay.
-    std::thread([this, fan1_rpm_str, fan2_rpm_str, generation]() {
-        auto fan1_result =
-            socket_client->send_command_async(SET_FAN_SPEED,
-                                              "1 " + fan1_rpm_str)
-                .get();
-        if (fan1_result != "OK") {
-            std::cerr << "Failed to set fan 1 speed: " << fan1_result
-                      << std::endl;
-            return;
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-
-        if (manual_request_generation.load(std::memory_order_acquire) !=
-            generation) {
-            return;
-        }
-
-        auto fan2_result =
-            socket_client->send_command_async(SET_FAN_SPEED,
-                                              "2 " + fan2_rpm_str)
-                .get();
-        if (fan2_result != "OK") {
-            std::cerr << "Failed to set fan 2 speed: " << fan2_result
-                      << std::endl;
-        }
-    }).detach();
+    static_cast<VictusFanControl*>(data)->set_mode("AUTO");
 }
 
-void VictusFanControl::on_mode_changed(GtkComboBox *widget, gpointer data)
+void VictusFanControl::on_max_clicked(GtkButton *button, gpointer data)
 {
-    VictusFanControl *self = static_cast<VictusFanControl*>(data);
-    gchar *mode = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(widget));
-
-    if (mode) {
-        std::string mode_str(mode);
-        
-        // Send the mode command and wait for it to complete.
-        auto result = self->socket_client->send_command_async(SET_FAN_MODE, mode_str).get();
-
-        if (result == "OK") {
-            // If we are entering manual mode, now we can safely set the fan speed.
-            if (mode_str == "MANUAL") {
-                int level = static_cast<int>(gtk_range_get_value(GTK_RANGE(self->speed_slider)));
-                self->set_fan_rpm(level);
-            } else if (mode_str == "BETTER_AUTO") {
-                gtk_widget_set_sensitive(self->speed_slider, FALSE);
-                gtk_widget_set_sensitive(self->slider_label, FALSE);
-            }
-        } else {
-            std::cerr << "Failed to set fan mode: " << result << std::endl;
-        }
-        
-        g_free(mode);
-        
-        // After all commands are sent, update the UI to reflect the final state.
-        self->update_ui_from_system_state();
-    }
+    static_cast<VictusFanControl*>(data)->set_mode("MAX");
 }
 
-void VictusFanControl::on_speed_slider_changed(GtkRange *range, gpointer data)
-{
-    VictusFanControl *self = static_cast<VictusFanControl*>(data);
-    const char *active_id =
-        gtk_combo_box_get_active_id(GTK_COMBO_BOX(self->mode_selector));
-    if (!active_id || std::string(active_id) != "MANUAL") {
-        return;
-    }
-
-    int level = static_cast<int>(gtk_range_get_value(range));
-    self->set_fan_rpm(level);
-}

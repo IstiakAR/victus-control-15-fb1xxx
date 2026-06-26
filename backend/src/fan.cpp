@@ -1,41 +1,29 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <atomic>
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
-#include <cmath>
 #include <cctype>
 #include <cstring>
 #include <dirent.h>
-#include <exception>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <optional>
 #include <sstream>
-#include <sys/un.h>
 #include <sys/wait.h>
-#include <thread>
 #include <vector>
 
 #include "fan.hpp"
 #include "util.hpp"
 #include "validation.hpp"
 
-static std::atomic<int> fan_thread_generation(0);
-static std::atomic<bool> is_reapplying(false);
-static std::mutex fan_state_mutex;
-static std::optional<std::string> last_fan1_speed;
-static std::optional<std::string> last_fan2_speed;
 static std::mutex mode_mutex;
 static std::string requested_mode = "AUTO";
 static std::atomic<bool> fan_mode_requires_root(false);
-
-static std::atomic<bool> better_auto_running(false);
-static std::thread better_auto_thread;
-static std::chrono::steady_clock::time_point better_auto_last_manual_assert;
 
 static std::once_flag cpu_sensor_once;
 static std::once_flag gpu_sensor_once;
@@ -47,38 +35,16 @@ static std::atomic<bool> cpu_sensor_warned(false);
 static std::atomic<bool> gpu_sensor_warned(false);
 static std::atomic<bool> gpu_usage_warned(false);
 
-struct CpuSampleTimes {
-    unsigned long long idle;
-    unsigned long long total;
-};
-static std::mutex cpu_usage_mutex;
-static std::optional<CpuSampleTimes> previous_cpu_times;
+static std::array<int, 2> fan_max_cache = {0, 0};
+static std::once_flag fan_max_once[2];
 
-static constexpr int kBetterAutoMinRpm = 2600;
-static constexpr std::array<int, 2> kBetterAutoMaxFallback = {5800, 6100};
-static constexpr int kBetterAutoSteps = 8;
-static constexpr std::chrono::seconds kBetterAutoTick{2};
-static constexpr std::chrono::seconds kBetterAutoReapply{90};
-static constexpr int kBetterAutoCooldownLevel = 5;
-static constexpr std::chrono::seconds kBetterAutoCooldown{90};
-static constexpr std::chrono::seconds kFanApplyGap{10};
 static constexpr const char *kSudoPath = "/usr/bin/sudo";
 static constexpr const char *kFanModeHelperPath = "/usr/bin/set-fan-mode.sh";
 static constexpr const char *kFanSpeedHelperPath = "/usr/bin/set-fan-speed.sh";
 
-static std::array<std::once_flag, 2> fan_max_once;
-static std::array<int, 2> fan_max_cache = kBetterAutoMaxFallback;
-static std::mutex fan_apply_mutex;
-static std::array<std::chrono::steady_clock::time_point, 2> fan_last_apply = {
-    std::chrono::steady_clock::time_point::min(),
-    std::chrono::steady_clock::time_point::min()
-};
-
-struct ThermalSnapshot {
-    std::optional<double> cpu_temp_c;
-    std::optional<double> gpu_temp_c;
-    std::optional<double> cpu_usage_pct;
-    std::optional<double> gpu_usage_pct;
+struct CpuSampleTimes {
+    unsigned long long idle;
+    unsigned long long total;
 };
 
 static std::string to_lower_copy(const std::string &input)
@@ -89,6 +55,7 @@ static std::string to_lower_copy(const std::string &input)
     });
     return lowered;
 }
+
 
 static std::optional<std::string> find_thermal_zone_by_type(const std::vector<std::string> &hints)
 {
@@ -231,7 +198,7 @@ static std::optional<std::string> locate_cpu_temp_sensor()
         }
 
         if (!cpu_temp_path && !cpu_sensor_warned.exchange(true)) {
-            std::cerr << "better-auto: CPU thermal sensor not found; automatic mode will use default fan steps" << std::endl;
+            std::cerr << "AUTO mode: CPU thermal sensor not found" << std::endl;
         }
     });
     return cpu_temp_path;
@@ -250,7 +217,7 @@ static std::optional<std::string> locate_gpu_temp_sensor()
         }
 
         if (!gpu_temp_path && !gpu_sensor_warned.exchange(true)) {
-            std::cerr << "better-auto: GPU thermal sensor not found; automatic mode will rely on CPU temperature" << std::endl;
+            std::cerr << "AUTO mode: GPU thermal sensor not found" << std::endl;
         }
     });
     return gpu_temp_path;
@@ -262,7 +229,7 @@ static std::optional<std::string> locate_gpu_busy_file()
         DIR *dir = opendir("/sys/class/drm");
         if (!dir) {
             if (!gpu_usage_warned.exchange(true)) {
-                std::cerr << "better-auto: /sys/class/drm unavailable; GPU usage tracking disabled" << std::endl;
+                std::cerr << "AUTO mode: /sys/class/drm unavailable" << std::endl;
             }
             return;
         }
@@ -285,19 +252,15 @@ static std::optional<std::string> locate_gpu_busy_file()
 
         closedir(dir);
         if (!gpu_busy_path && !gpu_usage_warned.exchange(true)) {
-            std::cerr << "better-auto: GPU usage source not found; automatic mode will use temperature only" << std::endl;
+            std::cerr << "AUTO mode: GPU usage source not found" << std::endl;
         }
     });
     return gpu_busy_path;
 }
 
-static std::optional<double> read_temperature_celsius(const std::optional<std::string> &path)
+static std::optional<double> read_temperature_celsius(const std::string &path)
 {
-    if (!path) {
-        return std::nullopt;
-    }
-
-    std::ifstream file(*path);
+    std::ifstream file(path);
     if (!file) {
         return std::nullopt;
     }
@@ -333,10 +296,13 @@ static std::optional<double> read_cpu_usage_pct()
     unsigned long long non_idle = user + nice + system + irq + softirq + steal;
     unsigned long long total = idle_all + non_idle;
 
+    static std::mutex cpu_usage_mutex;
+    static std::optional<CpuSampleTimes> previous_cpu_times;
+
     std::lock_guard<std::mutex> lock(cpu_usage_mutex);
     if (!previous_cpu_times) {
         previous_cpu_times = CpuSampleTimes{idle_all, total};
-        return std::nullopt; // need a baseline before reporting usage
+        return std::nullopt;
     }
 
     unsigned long long total_diff = total - previous_cpu_times->total;
@@ -353,12 +319,12 @@ static std::optional<double> read_cpu_usage_pct()
 
 static std::optional<double> read_gpu_usage_pct()
 {
-    auto path = locate_gpu_busy_file();
-    if (!path) {
+    static std::optional<std::string> gpu_busy_path = locate_gpu_busy_file();
+    if (!gpu_busy_path) {
         return std::nullopt;
     }
 
-    std::ifstream file(*path);
+    std::ifstream file(*gpu_busy_path);
     if (!file) {
         return std::nullopt;
     }
@@ -370,16 +336,6 @@ static std::optional<double> read_gpu_usage_pct()
     }
 
     return value;
-}
-
-static ThermalSnapshot collect_snapshot()
-{
-    ThermalSnapshot snapshot;
-    snapshot.cpu_temp_c = read_temperature_celsius(locate_cpu_temp_sensor());
-    snapshot.gpu_temp_c = read_temperature_celsius(locate_gpu_temp_sensor());
-    snapshot.cpu_usage_pct = read_cpu_usage_pct();
-    snapshot.gpu_usage_pct = read_gpu_usage_pct();
-    return snapshot;
 }
 
 static int fan_max_for_index(size_t index)
@@ -398,675 +354,310 @@ static int fan_max_for_index(size_t index)
                 }
             }
         }
-        fan_max_cache[index] = kBetterAutoMaxFallback[index];
+        fan_max_cache[index] = (index == 0) ? 5800 : 6100;
     });
     return fan_max_cache[index];
 }
 
-static int clamp_to_fan_limits(size_t index, int rpm)
+static int encode_pwm_mode(const std::string &mode)
 {
-    int max_rpm = fan_max_for_index(index);
-    if (rpm < 0) {
-        return 0;
-    }
-    return std::min(rpm, max_rpm);
-}
-
-static int level_from_thresholds(double value, const std::array<double, 7> &thresholds)
-{
-    int level = 1;
-    for (double threshold : thresholds) {
-        if (value >= threshold) {
-            ++level;
-        }
-    }
-    return std::clamp(level, 1, kBetterAutoSteps);
-}
-
-static int rpm_for_level_for_fan(int level, size_t fan_index)
-{
-    level = std::clamp(level, 1, kBetterAutoSteps);
-    int max_rpm = fan_max_for_index(fan_index);
-    if (kBetterAutoSteps <= 1) {
-        return max_rpm;
-    }
-
-    double step = static_cast<double>(max_rpm - kBetterAutoMinRpm) / static_cast<double>(kBetterAutoSteps - 1);
-    double value = static_cast<double>(kBetterAutoMinRpm) + static_cast<double>(level - 1) * step;
-    int rpm = static_cast<int>(std::round(value));
-    rpm = std::clamp(rpm, kBetterAutoMinRpm, max_rpm);
-    return rpm;
-}
-
-static std::array<int, 2> rpm_for_level(int level)
-{
-    return {rpm_for_level_for_fan(level, 0), rpm_for_level_for_fan(level, 1)};
-}
-
-static int level_from_snapshot(const ThermalSnapshot &snapshot, int previous_level)
-{
-    const std::array<double, 7> temp_thresholds = {45.0, 55.0, 65.0, 70.0, 75.0, 80.0, 84.0};
-    const std::array<double, 7> usage_thresholds = {15.0, 20.0, 25.0, 35.0, 45.0, 55.0, 65.0};
-
-    double hottest = 0.0;
-    bool have_temp = false;
-    if (snapshot.cpu_temp_c) {
-        hottest = std::max(hottest, *snapshot.cpu_temp_c);
-        have_temp = true;
-    }
-    if (snapshot.gpu_temp_c) {
-        hottest = std::max(hottest, *snapshot.gpu_temp_c);
-        have_temp = true;
-    }
-
-    int temp_level = have_temp ? level_from_thresholds(hottest, temp_thresholds) : previous_level;
-
-    double usage_pct = 0.0;
-    bool have_usage = false;
-    if (snapshot.cpu_usage_pct) {
-        usage_pct = std::max(usage_pct, *snapshot.cpu_usage_pct);
-        have_usage = true;
-    }
-    if (snapshot.gpu_usage_pct) {
-        usage_pct = std::max(usage_pct, *snapshot.gpu_usage_pct);
-        have_usage = true;
-    }
-
-    int usage_level = have_usage ? level_from_thresholds(usage_pct, usage_thresholds) : 1;
-
-    int target_level = std::max(temp_level, usage_level);
-    target_level = std::clamp(target_level, 1, kBetterAutoSteps);
-
-    if (target_level < previous_level) {
-        // Drop at most one step per sample to avoid oscillations
-        target_level = std::max(target_level, previous_level - 1);
-    }
-
-    return target_level;
-}
-
-static void stop_better_auto();
-static std::string start_better_auto();
-static void better_auto_worker();
-
-static bool encode_pwm_mode(const std::string &mode, std::string &encoded)
-{
-	if (mode == "AUTO") {
-		encoded = "2";
-		return true;
-	}
-	if (mode == "MANUAL") {
-		encoded = "1";
-		return true;
-	}
-	if (mode == "MAX") {
-		encoded = "0";
-		return true;
-	}
-	if (mode == "BETTER_AUTO") {
-		encoded = "1";
-		return true;
-	}
-
-	return false;
+    if (mode == "AUTO") return 2;
+    if (mode == "MAX") return 0;
+    return -1;
 }
 
 static int run_helper_command(const std::vector<std::string> &args)
 {
-	if (args.empty()) {
-		errno = EINVAL;
-		return -1;
-	}
+    if (args.empty()) {
+        errno = EINVAL;
+        return -1;
+    }
 
-	std::vector<char *> argv;
-	argv.reserve(args.size() + 1);
-	for (const auto &arg : args) {
-		argv.push_back(const_cast<char *>(arg.c_str()));
-	}
-	argv.push_back(nullptr);
+    std::vector<char *> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto &arg : args) {
+        argv.push_back(const_cast<char *>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
 
-	pid_t pid = fork();
-	if (pid < 0) {
-		return -1;
-	}
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
 
-	if (pid == 0) {
-		execv(args.front().c_str(), argv.data());
-		_exit(127);
-	}
+    if (pid == 0) {
+        execv(args.front().c_str(), argv.data());
+        _exit(127);
+    }
 
-	int status = 0;
-	while (waitpid(pid, &status, 0) < 0) {
-		if (errno != EINTR) {
-			return -1;
-		}
-	}
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
 
-	return status;
+    return status;
 }
 
 static std::string apply_fan_mode_with_sudo(const std::string &mode)
 {
-	std::string encoded_mode;
-	if (!encode_pwm_mode(mode, encoded_mode)) {
-		return "ERROR: Invalid fan mode";
-	}
-	(void)encoded_mode;
+    int result = run_helper_command({kSudoPath, kFanModeHelperPath, mode});
 
-	int result = run_helper_command({kSudoPath, kFanModeHelperPath, mode});
+    if (result == 0) {
+        return "OK";
+    }
 
-	if (result == 0) {
-		return "OK";
-	}
+    if (result == -1) {
+        std::cerr << "set-fan-mode.sh invocation failed: " << strerror(errno) << std::endl;
+        return "ERROR: Unable to set fan mode";
+    }
 
-	if (result == -1) {
-		std::cerr << "set-fan-mode.sh invocation failed: " << strerror(errno) << std::endl;
-		return "ERROR: Unable to set fan mode";
-	}
+    if (WIFEXITED(result)) {
+        std::cerr << "set-fan-mode.sh failed with exit code: " << WEXITSTATUS(result) << std::endl;
+    } else {
+        std::cerr << "set-fan-mode.sh terminated abnormally when setting mode " << mode << std::endl;
+    }
 
-	if (WIFEXITED(result)) {
-		std::cerr << "set-fan-mode.sh failed with exit code: " << WEXITSTATUS(result) << std::endl;
-	} else {
-		std::cerr << "set-fan-mode.sh terminated abnormally when setting mode " << mode << std::endl;
-	}
-
-	return "ERROR: Unable to set fan mode";
+    return "ERROR: Unable to set fan mode";
 }
 
 static std::string write_hw_fan_mode(const std::string &mode)
 {
-	std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
+    std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
 
-	if (!hwmon_path.empty())
-	{
-		bool use_sudo = fan_mode_requires_root.load(std::memory_order_acquire);
-		std::string encoded_mode;
-		if (!encode_pwm_mode(mode, encoded_mode)) {
-			return "ERROR: Invalid fan mode: " + mode;
-		}
-
-		if (!use_sudo) {
-			std::string control_path = hwmon_path + "/pwm1_enable";
-			errno = 0;
-			std::ofstream fan_ctrl(control_path);
-
-			if (fan_ctrl) {
-				fan_ctrl << encoded_mode;
-				fan_ctrl.flush();
-				if (!fan_ctrl.fail()) {
-					return "OK";
-				}
-
-				int write_errno = errno;
-				std::cerr << "Failed to write fan mode via sysfs: " << strerror(write_errno) << std::endl;
-				if (write_errno != EACCES && write_errno != EPERM) {
-					return "ERROR: Failed to write fan mode";
-				}
-				fan_mode_requires_root.store(true, std::memory_order_release);
-				use_sudo = true;
-			} else {
-				int open_errno = errno;
-				std::cerr << "Failed to open fan mode control (" << control_path << "): " << strerror(open_errno) << std::endl;
-				if (open_errno != EACCES && open_errno != EPERM) {
-					return "ERROR: Unable to set fan mode";
-				}
-				fan_mode_requires_root.store(true, std::memory_order_release);
-				use_sudo = true;
-			}
-		}
-
-		if (use_sudo) {
-			return apply_fan_mode_with_sudo(mode);
-		}
-
-		return "ERROR: Unable to set fan mode";
-	}
-
-	return "ERROR: Hwmon directory not found";
-}
-
-static void better_auto_worker()
-{
-    std::cout << "better-auto: control loop started" << std::endl;
-    int current_level = 3;
-    int sensor_level = 3;
-    auto last_apply = std::chrono::steady_clock::time_point::min();
-    better_auto_last_manual_assert = std::chrono::steady_clock::time_point::min();
-    auto cooldown_until = std::chrono::steady_clock::time_point::min();
-    int cooldown_level = 0;
-
-    while (better_auto_running.load(std::memory_order_acquire)) {
-        ThermalSnapshot snapshot = collect_snapshot();
-        sensor_level = level_from_snapshot(snapshot, sensor_level);
-        int target_level = sensor_level;
-        auto now = std::chrono::steady_clock::now();
-
-        if (cooldown_level > 0 && now >= cooldown_until) {
-            cooldown_level = 0;
-            cooldown_until = std::chrono::steady_clock::time_point::min();
+    if (!hwmon_path.empty())
+    {
+        bool use_sudo = fan_mode_requires_root.load(std::memory_order_acquire);
+        int encoded_mode = encode_pwm_mode(mode);
+        if (encoded_mode < 0) {
+            return "ERROR: Invalid fan mode: " + mode;
         }
 
-        if (cooldown_level > 0 && target_level < cooldown_level) {
-            target_level = cooldown_level;
-        }
+        if (!use_sudo) {
+            std::string control_path = hwmon_path + "/pwm1_enable";
+            errno = 0;
+            std::ofstream fan_ctrl(control_path);
 
-        bool need_mode_refresh = (better_auto_last_manual_assert == std::chrono::steady_clock::time_point::min()) ||
-                                 (now - better_auto_last_manual_assert >= std::chrono::seconds(80));
-        if (need_mode_refresh) {
-            auto refresh_result = write_hw_fan_mode("MANUAL");
-            if (refresh_result != "OK") {
-                std::cerr << "better-auto: failed to keep manual mode active: " << refresh_result << std::endl;
-            }
-            better_auto_last_manual_assert = now;
-        }
-
-        if (target_level < current_level) {
-            target_level = std::max(target_level, current_level - 1);
-        }
-
-        bool need_apply = (target_level != current_level) ||
-                          (last_apply == std::chrono::steady_clock::time_point::min()) ||
-                          (now - last_apply >= kBetterAutoReapply);
-
-        if (need_apply) {
-            auto rpms = rpm_for_level(target_level);
-            std::string rpm_str_fan1 = std::to_string(rpms[0]);
-            std::string rpm_str_fan2 = std::to_string(rpms[1]);
-
-            auto result1 = set_fan_speed("1", rpm_str_fan1, false, true);
-            if (result1 != "OK") {
-                std::cerr << "better-auto: failed to set fan 1 speed: " << result1 << std::endl;
-            }
-
-            const int gap_seconds = static_cast<int>(kFanApplyGap.count());
-            for (int i = 0; i < gap_seconds; ++i) {
-                if (!better_auto_running.load(std::memory_order_acquire)) {
-                    break;
+            if (fan_ctrl) {
+                fan_ctrl << encoded_mode;
+                fan_ctrl.flush();
+                if (!fan_ctrl.fail()) {
+                    return "OK";
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
 
-            if (!better_auto_running.load(std::memory_order_acquire)) {
-                break;
+                int write_errno = errno;
+                std::cerr << "Failed to write fan mode via sysfs: " << strerror(write_errno) << std::endl;
+                if (write_errno != EACCES && write_errno != EPERM) {
+                    return "ERROR: Failed to write fan mode";
+                }
+                fan_mode_requires_root.store(true, std::memory_order_release);
+                use_sudo = true;
+            } else {
+                int open_errno = errno;
+                std::cerr << "Failed to open fan mode control (" << control_path << "): " << strerror(open_errno) << std::endl;
+                if (open_errno != EACCES && open_errno != EPERM) {
+                    return "ERROR: Unable to set fan mode";
+                }
+                fan_mode_requires_root.store(true, std::memory_order_release);
+                use_sudo = true;
             }
-
-            auto result2 = set_fan_speed("2", rpm_str_fan2, false, true);
-            if (result2 != "OK") {
-                std::cerr << "better-auto: failed to set fan 2 speed: " << result2 << std::endl;
-            }
-
-            current_level = target_level;
-            last_apply = now;
         }
 
-        if (sensor_level >= kBetterAutoCooldownLevel) {
-            cooldown_level = std::max(cooldown_level, current_level);
-            cooldown_until = now + kBetterAutoCooldown;
+        if (use_sudo) {
+            return apply_fan_mode_with_sudo(mode);
         }
 
-        const int tick_seconds = static_cast<int>(kBetterAutoTick.count());
-        for (int i = 0; i < tick_seconds; ++i) {
-            if (!better_auto_running.load(std::memory_order_acquire)) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        return "ERROR: Unable to set fan mode";
     }
 
-    std::cout << "better-auto: control loop stopped" << std::endl;
-}
-
-static void stop_better_auto()
-{
-    if (better_auto_running.exchange(false, std::memory_order_acq_rel)) {
-        if (better_auto_thread.joinable()) {
-            better_auto_thread.join();
-        }
-    } else if (better_auto_thread.joinable()) {
-        better_auto_thread.join();
-    }
-    better_auto_thread = std::thread();
-}
-
-static std::string start_better_auto()
-{
-    stop_better_auto();
-
-    auto result = write_hw_fan_mode("MANUAL");
-    if (result != "OK") {
-        return result;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(cpu_usage_mutex);
-        previous_cpu_times.reset();
-    }
-
-    better_auto_running.store(true, std::memory_order_release);
-    try {
-        better_auto_thread = std::thread(better_auto_worker);
-    } catch (const std::exception &ex) {
-        better_auto_running.store(false, std::memory_order_release);
-        std::cerr << "better-auto: failed to start worker thread: " << ex.what() << std::endl;
-        return "ERROR: Unable to start better auto control thread";
-    } catch (...) {
-        better_auto_running.store(false, std::memory_order_release);
-        std::cerr << "better-auto: failed to start worker thread (unknown error)" << std::endl;
-        return "ERROR: Unable to start better auto control thread";
-    }
-
-    return "OK";
-}
-
-// Function to reapply fan settings without triggering fan_mode_trigger
-void reapply_fan_settings() {
-    bool expected = false;
-    if (!is_reapplying.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
-        return; // Another reapply loop is already running
-    }
-
-    std::optional<std::string> fan1_speed;
-    std::optional<std::string> fan2_speed;
-    {
-        std::lock_guard<std::mutex> lock(fan_state_mutex);
-        fan1_speed = last_fan1_speed;
-        fan2_speed = last_fan2_speed;
-    }
-
-    std::string current_mode = get_fan_mode();
-    if (current_mode == "MANUAL" && (fan1_speed || fan2_speed)) {
-        std::ostringstream log_message;
-        log_message << "Re-applying manual fan settings";
-        bool has_detail = false;
-
-        if (fan1_speed) {
-            log_message << (has_detail ? ", " : ": ") << "fan1=" << *fan1_speed;
-            has_detail = true;
-        }
-        if (fan2_speed) {
-            log_message << (has_detail ? ", " : ": ") << "fan2=" << *fan2_speed;
-        }
-
-        std::cout << log_message.str() << std::endl;
-
-        if (fan1_speed) {
-            auto result = set_fan_speed("1", *fan1_speed, false, false);
-            if (result != "OK") {
-                std::cerr << "Failed to reapply fan 1 speed: " << result << std::endl;
-            }
-        }
-
-        if (fan2_speed) {
-            auto result = set_fan_speed("2", *fan2_speed, false, false);
-            if (result != "OK") {
-                std::cerr << "Failed to reapply fan 2 speed: " << result << std::endl;
-            }
-        }
-    }
-
-    is_reapplying.store(false, std::memory_order_release);
-}
-
-// call set_fan_mode every 90 seconds so that the mode doesn't revert back (weird hp behaviour)
-// also re-applies manual fan speed
-void fan_mode_trigger(const std::string mode) {
-    fan_thread_generation++;
-	if (mode == "AUTO" || mode == "BETTER_AUTO") return;
-
-    std::thread([mode, gen = fan_thread_generation.load()]() {
-        while (fan_thread_generation == gen) {
-            // Reapply the fan mode directly via hwmon
-            auto result = write_hw_fan_mode(mode);
-            if (result != "OK") {
-                std::cerr << "fan_mode_trigger: failed to assert mode " << mode << ": " << result << std::endl;
-            }
-
-            // Reapply fan settings if in manual mode
-            if (mode == "MANUAL") {
-                reapply_fan_settings();
-            }
-
-            // Wait for the interval (90 seconds)
-            for (int i = 0; i < 90; ++i) {
-                if (fan_thread_generation != gen) return;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        }
-    }).detach();
+    return "ERROR: Hwmon directory not found";
 }
 
 std::string get_fan_mode()
 {
-	{
-		std::lock_guard<std::mutex> lock(mode_mutex);
-		if (requested_mode == "BETTER_AUTO") {
-			return requested_mode;
-		}
-	}
+    std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
 
-	std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
+    if (!hwmon_path.empty())
+    {
+        std::string pwm_path = hwmon_path + "/pwm1_enable";
+        std::ifstream fan_ctrl(pwm_path);
 
-	if (!hwmon_path.empty())
-	{
-		std::string pwm_path = hwmon_path + "/pwm1_enable";
-		std::ifstream fan_ctrl(pwm_path);
+        if (fan_ctrl)
+        {
+            std::stringstream buffer;
+            buffer << fan_ctrl.rdbuf();
+            std::string fan_mode = buffer.str();
 
-		if (fan_ctrl)
-		{
-			std::stringstream buffer;
-			buffer << fan_ctrl.rdbuf();
-			std::string fan_mode = buffer.str();
+            fan_mode.erase(fan_mode.find_last_not_of(" \n\r\t") + 1);
 
-			fan_mode.erase(fan_mode.find_last_not_of(" \n\r\t") + 1);
-
-			if (fan_mode == "2")
-				return "AUTO";
-			else if (fan_mode == "1")
-				return "MANUAL";
-			else if (fan_mode == "0")
-				return "MAX";
-			else
-				return "ERROR: Unknown fan mode " + fan_mode;
-		}
-		else
-		{
-			std::cerr << "Failed to open fan control file. Error: " << strerror(errno) << std::endl;
-			return "ERROR: Unable to read fan mode";
-		}
-	}
-	else
-	{
-		std::cerr << "Hwmon directory not found" << std::endl;
-		return "ERROR: Hwmon directory not found";
-	}
+            if (fan_mode == "2")
+                return "AUTO";
+            else if (fan_mode == "0")
+                return "MAX";
+            else
+                return "AUTO";
+        }
+        else
+        {
+            std::cerr << "Failed to open fan control file. Error: " << strerror(errno) << std::endl;
+            return "ERROR: Unable to read fan mode";
+        }
+    }
+    else
+    {
+        std::cerr << "Hwmon directory not found" << std::endl;
+        return "ERROR: Hwmon directory not found";
+    }
 }
 
 std::string set_fan_mode(const std::string &mode)
 {
-    std::string previous_mode;
-    {
-        std::lock_guard<std::mutex> lock(mode_mutex);
-        previous_mode = requested_mode;
+    if (mode != "AUTO" && mode != "MAX") {
+        return "ERROR: Invalid fan mode. Use AUTO or MAX.";
     }
-    bool entering_manual = (mode == "MANUAL" && previous_mode != "MANUAL");
-
-    if (mode == "BETTER_AUTO") {
-        auto result = start_better_auto();
-        if (result == "OK") {
-            std::lock_guard<std::mutex> lock(mode_mutex);
-            requested_mode = "BETTER_AUTO";
-        }
-        return result;
-    }
-
-    stop_better_auto();
 
     auto result = write_hw_fan_mode(mode);
     if (result == "OK") {
         std::lock_guard<std::mutex> lock(mode_mutex);
         requested_mode = mode;
-        if (entering_manual) {
-            std::lock_guard<std::mutex> speed_lock(fan_state_mutex);
-            last_fan1_speed.reset();
-            last_fan2_speed.reset();
-        }
     }
     return result;
 }
 
-std::string ensure_better_auto_mode()
-{
-    bool needs_force = false;
-    {
-        std::lock_guard<std::mutex> lock(mode_mutex);
-        if (requested_mode != "BETTER_AUTO") {
-            needs_force = true;
-        } else if (!better_auto_running.load(std::memory_order_acquire)) {
-            needs_force = true;
-        }
-    }
-
-    if (!needs_force) {
-        return "OK";
-    }
-
-    std::cout << "Enforcing BETTER_AUTO mode" << std::endl;
-    auto result = set_fan_mode("BETTER_AUTO");
-    if (result == "OK") {
-        fan_mode_trigger("BETTER_AUTO");
-    }
-    return result;
-}
-
-void shutdown_fan_controller()
-{
-    fan_thread_generation++;
-    stop_better_auto();
-}
-
-std::string get_fan_speed(const std::string &fan_num)
-{
-	auto fan_index = fan_index_from_string(fan_num);
-	if (!fan_index) {
-		return "ERROR: Invalid fan number";
-	}
-
-	std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
-
-	if (!hwmon_path.empty())
-	{
-		std::string fan_path =
-		    hwmon_path + "/fan" + std::to_string(*fan_index + 1) + "_input";
-		std::ifstream fan_file(fan_path);
-
-		if (fan_file)
-		{
-			std::stringstream buffer;
-			buffer << fan_file.rdbuf();
-
-			std::string fan_speed = buffer.str();
-
-			fan_speed.erase(fan_speed.find_last_not_of(" \n\r\t") + 1);
-
-			return fan_speed;
-		}
-		else
-		{
-			std::cerr << "Failed to open fan speed file. Error: " << strerror(errno) << std::endl;
-			return "ERROR: Unable to read fan speed";
-		}
-	}
-	else
-	{
-		std::cerr << "Hwmon directory not found" << std::endl;
-		return "ERROR: Hwmon directory not found";
-	}
-}
-
-std::string get_fan_max_speed(const std::string &fan_num)
-{
-	auto fan_index = fan_index_from_string(fan_num);
-	if (!fan_index) {
-		return "ERROR: Invalid fan number";
-	}
-
-	return std::to_string(fan_max_for_index(*fan_index));
-}
-
-std::string get_cpu_temperature()
-{
-	auto cpu_temp = read_temperature_celsius(locate_cpu_temp_sensor());
-	if (!cpu_temp) {
-		return "ERROR: CPU temperature unavailable";
-	}
-
-	return std::to_string(static_cast<int>(std::lround(*cpu_temp)));
-}
-
-std::string set_fan_speed(const std::string &fan_num, const std::string &speed, bool trigger_mode, bool update_cache)
+std::string set_fan_speed(const std::string &fan_num, const std::string &speed, bool, bool)
 {
     auto fan_index = fan_index_from_string(fan_num);
     if (!fan_index) {
         return "ERROR: Invalid fan number";
     }
 
-    int parsed_speed = 0;
-    if (!parse_strict_int(speed, &parsed_speed) || parsed_speed < 0) {
-        return "ERROR: Invalid fan speed";
-    }
+    std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
 
-    size_t index = *fan_index;
-    int clamped_speed = clamp_to_fan_limits(index, parsed_speed);
-    if (clamped_speed != parsed_speed) {
-        std::cout << "set_fan_speed: clamped fan " << fan_num << " target from " << parsed_speed << " to " << clamped_speed << std::endl;
-    }
-    std::string clamped_str = std::to_string(clamped_speed);
-    if (update_cache) {
-        std::lock_guard<std::mutex> lock(fan_state_mutex);
-        if (index == 0) {
-            last_fan1_speed = clamped_str;
-        } else {
-            last_fan2_speed = clamped_str;
-        }
-    }
-
-    std::unique_lock<std::mutex> apply_lock(fan_apply_mutex);
-    auto now = std::chrono::steady_clock::now();
-    if (index == 1 && fan_last_apply[0] != std::chrono::steady_clock::time_point::min()) {
-        auto elapsed = now - fan_last_apply[0];
-        if (elapsed < kFanApplyGap) {
-            auto wait_duration = kFanApplyGap - elapsed;
-            apply_lock.unlock();
-            std::this_thread::sleep_for(wait_duration);
-            apply_lock.lock();
-        }
-    }
-
-    int result = run_helper_command({kSudoPath, kFanSpeedHelperPath, fan_num, clamped_str});
-    fan_last_apply[index] = std::chrono::steady_clock::now();
-    apply_lock.unlock();
-
-    if (result == 0)
+    if (!hwmon_path.empty())
     {
-        // Only trigger fan_mode_trigger if requested and not already reapplying
-        if (trigger_mode && !is_reapplying.load(std::memory_order_acquire) && get_fan_mode() == "MANUAL") {
-            fan_mode_trigger("MANUAL");
+        std::string pwm_path = hwmon_path + "/pwm" + std::to_string(*fan_index + 1);
+        int target_speed = 0;
+        if (!parse_strict_int(speed, &target_speed)) {
+            return "ERROR: Invalid speed value";
         }
-        return "OK";
-    }
-    if (result == -1) {
-        std::cerr << "Failed to execute set-fan-speed.sh for fan " << fan_num
-                  << ": " << strerror(errno) << std::endl;
-        return "ERROR: Failed to set fan speed";
+
+        errno = 0;
+        std::ofstream pwm_file(pwm_path);
+
+        if (pwm_file) {
+            pwm_file << target_speed;
+            pwm_file.flush();
+            if (!pwm_file.fail()) {
+                return "OK";
+            }
+            return "ERROR: Failed to write fan speed";
+        } else {
+            std::cerr << "Failed to open fan speed control: " << strerror(errno) << std::endl;
+            return "ERROR: Unable to set fan speed";
+        }
     }
 
-    if (WIFEXITED(result)) {
-        std::cerr << "Failed to execute set-fan-speed.sh for fan " << fan_num
-                  << ". Exit code: " << WEXITSTATUS(result) << std::endl;
-    } else {
-        std::cerr << "set-fan-speed.sh terminated abnormally for fan "
-                  << fan_num << std::endl;
+    return "ERROR: Hwmon directory not found";
+}
+
+std::string get_fan_speed(const std::string &fan_num)
+{
+    auto fan_index = fan_index_from_string(fan_num);
+    if (!fan_index) {
+        return "ERROR: Invalid fan number";
     }
 
-    return "ERROR: Failed to set fan speed";
+    std::string hwmon_path = find_hwmon_directory("/sys/devices/platform/hp-wmi/hwmon");
+
+    if (!hwmon_path.empty())
+    {
+        std::string fan_path =
+            hwmon_path + "/fan" + std::to_string(*fan_index + 1) + "_input";
+        std::ifstream fan_file(fan_path);
+
+        if (fan_file)
+        {
+            std::stringstream buffer;
+            buffer << fan_file.rdbuf();
+
+            std::string fan_speed = buffer.str();
+            fan_speed.erase(fan_speed.find_last_not_of(" \n\r\t") + 1);
+
+            return fan_speed;
+        }
+        else
+        {
+            std::cerr << "Failed to open fan speed file. Error: " << strerror(errno) << std::endl;
+            return "ERROR: Unable to read fan speed";
+        }
+    }
+    else
+    {
+        std::cerr << "Hwmon directory not found" << std::endl;
+        return "ERROR: Hwmon directory not found";
+    }
+}
+
+std::string get_fan_max_speed(const std::string &fan_num)
+{
+    auto fan_index = fan_index_from_string(fan_num);
+    if (!fan_index) {
+        return "ERROR: Invalid fan number";
+    }
+
+    return std::to_string(fan_max_for_index(*fan_index));
+}
+
+std::string get_cpu_temperature()
+{
+    auto cpu_temp = read_temperature_celsius(*locate_cpu_temp_sensor());
+    if (!cpu_temp) {
+        return "ERROR: CPU temperature unavailable";
+    }
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << *cpu_temp;
+    return oss.str();
+}
+
+std::string get_gpu_temperature()
+{
+    auto gpu_temp = read_temperature_celsius(*locate_gpu_temp_sensor());
+    if (!gpu_temp) {
+        return "ERROR: GPU temperature unavailable";
+    }
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << *gpu_temp;
+    return oss.str();
+}
+
+std::string get_cpu_usage()
+{
+    auto usage = read_cpu_usage_pct();
+    if (!usage) {
+        return "ERROR: CPU usage unavailable";
+    }
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << *usage;
+    return oss.str();
+}
+
+std::string get_gpu_usage()
+{
+    auto usage = read_gpu_usage_pct();
+    if (!usage) {
+        return "ERROR: GPU usage unavailable";
+    }
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << *usage;
+    return oss.str();
+}
+
+void shutdown_fan_controller()
+{
+    // No background threads to stop anymore
 }

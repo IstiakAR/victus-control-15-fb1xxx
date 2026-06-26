@@ -6,19 +6,14 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <AUTO|MANUAL|MAX>" >&2
+    echo "Usage: $0 <AUTO|MAX>" >&2
     exit 1
 fi
 
 mode="${1^^}"
 case "$mode" in
     AUTO) value="2" ;;
-    MANUAL) value="1" ;;
     MAX) value="0" ;;
-    BETTER_AUTO)
-        # Better auto uses manual mode for the underlying control loop.
-        value="1"
-        ;;
     *)
         echo "Error: Unsupported fan mode '$1'." >&2
         exit 2

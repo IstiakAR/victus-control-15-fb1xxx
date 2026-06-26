@@ -7,79 +7,246 @@
 #include <gtk/gtk.h>
 #include "keyboard.hpp"
 #include "fan.hpp"
-#include "about.hpp"
 #include "socket.hpp"
 
 class VictusControl
 {
 public:
 	GtkWidget *window;
-	GtkWidget *notebook;
-	GtkWidget *menu_button;
-	GtkWidget *menu;
+	GtkWidget *main_box;
+	GtkWidget *content_area;
 
 	std::shared_ptr<VictusSocketClient> socket_client;
 	std::unique_ptr<VictusFanControl> fan_control;
 	std::unique_ptr<VictusKeyboardControl> keyboard_control;
-	VictusAbout about;
 
 	VictusControl()
 	{
+		load_css();
+
 		socket_client = std::make_shared<VictusSocketClient>("/run/victus-control/victus_backend.sock");
 		fan_control = std::make_unique<VictusFanControl>(socket_client);
 		keyboard_control = std::make_unique<VictusKeyboardControl>(socket_client);
 
 		window = gtk_window_new();
 		gtk_window_set_title(GTK_WINDOW(window), "victus-control");
-		gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
+		gtk_window_set_default_size(GTK_WINDOW(window), 700, 500);
+		gtk_widget_add_css_class(window, "app-window");
 
-		notebook = gtk_notebook_new();
-		gtk_widget_set_hexpand(notebook, TRUE);
-		gtk_widget_set_vexpand(notebook, TRUE);
-		gtk_window_set_child(GTK_WINDOW(window), notebook);
+		// Main vertical layout
+		main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+		gtk_window_set_child(GTK_WINDOW(window), main_box);
 
-		add_tabs();
-		add_menu();
+		// Custom title bar
+		GtkWidget *title_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+		gtk_widget_add_css_class(title_bar, "title-bar");
+
+		// Title label
+		GtkWidget *title_label = gtk_label_new("victus-control");
+		gtk_widget_add_css_class(title_label, "title-label");
+		gtk_widget_set_hexpand(title_label, TRUE);
+		gtk_widget_set_halign(title_label, GTK_ALIGN_START);
+		gtk_box_append(GTK_BOX(title_bar), title_label);
+
+		// Close button
+		GtkWidget *close_btn = gtk_button_new();
+		gtk_button_set_icon_name(GTK_BUTTON(close_btn), "window-close-symbolic");
+		gtk_widget_add_css_class(close_btn, "victus-title-btn");
+		g_signal_connect_swapped(close_btn, "clicked", G_CALLBACK(gtk_window_destroy), window);
+		gtk_box_append(GTK_BOX(title_bar), close_btn);
+
+		gtk_window_set_titlebar(GTK_WINDOW(window), title_bar);
+
+		// Content area (scrollable)
+		GtkWidget *scrolled = gtk_scrolled_window_new();
+		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+		                                GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+		gtk_widget_set_vexpand(scrolled, TRUE);
+
+		content_area = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+		gtk_widget_add_css_class(content_area, "main-box");
+		gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), content_area);
+
+		gtk_box_append(GTK_BOX(main_box), scrolled);
+
+		// Build the UI content
+		build_ui();
 	}
 
 	~VictusControl()
 	{
 	}
 
-	void add_tabs()
+	void load_css()
 	{
-		GtkWidget *keyboard_page = keyboard_control->get_page();
-		GtkWidget *fan_page = fan_control->get_page();
+		GtkCssProvider *provider = gtk_css_provider_new();
+		const char *css =
+			"/* Dark theme */\n"
+			"\n"
+			"* {\n"
+			"  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;\n"
+			"}\n"
+			"\n"
+			".app-window {\n"
+			"  background-color: #0d1117;\n"
+			"}\n"
+			"\n"
+			".main-box {\n"
+			"  background-color: #0d1117;\n"
+			"  padding: 24px 32px;\n"
+			"}\n"
+			"\n"
+			"/* Title bar */\n"
+			".title-bar {\n"
+			"  background-color: #0d1117;\n"
+			"  border-bottom: 1px solid #21262d;\n"
+			"  padding: 6px 12px;\n"
+			"  min-height: 36px;\n"
+			"}\n"
+			"\n"
+			".title-label {\n"
+			"  color: #c9d1d9;\n"
+			"  font-weight: 700;\n"
+			"  font-size: 14px;\n"
+			"  padding: 0 8px;\n"
+			"}\n"
+			"\n"
+			"victus-title-btn {\n"
+			"  background-color: #21262d !important;\n"
+			"  border: none;\n"
+			"  border-radius: 6px;\n"
+			"  padding: 6px;\n"
+			"  min-width: 32px;\n"
+			"  min-height: 32px;\n"
+			"  color: #8b949e;\n"
+			"}\n"
+			"\n"
+			"victus-title-btn:hover {\n"
+			"  background-color: #30363d !important;\n"
+			"  color: #c9d1d9;\n"
+			"}\n"
+			"\n"
+			"victus-title-btn.close-btn:hover {\n"
+			"  background-color: #f85149 !important;\n"
+			"  color: #ffffff;\n"
+			"}\n"
+			"\n"
+			"/* Card container */\n"
+			".card {\n"
+			"  background-color: #161b22;\n"
+			"  border: 1px solid #21262d;\n"
+			"  border-radius: 8px;\n"
+			"  padding: 20px 24px;\n"
+			"  margin: 8px 0;\n"
+			"}\n"
+			"\n"
+			"/* Card title */\n"
+			".card-title {\n"
+			"  color: #c9d1d9;\n"
+			"  font-size: 14px;\n"
+			"  font-weight: 700;\n"
+			"  margin-bottom: 16px;\n"
+			"  letter-spacing: 0.3px;\n"
+			"}\n"
+			"\n"
+			"/* Fan mode buttons */\n"
+			"button {\n"
+			"  min-height: 44px;\n"
+			"  border-radius: 8px;\n"
+			"  font-size: 15px;\n"
+			"  font-weight: 700;\n"
+			"  padding: 10px 24px;\n"
+			"  border: 2px solid #30363d !important;\n"
+			"  transition: all 150ms ease;\n"
+			"  background-color: #21262d !important;\n"
+			"  color: #ffffff !important;\n"
+			"}\n"
+			"\n"
+			"button.active {\n"
+			"  background-color: #1f6feb !important;\n"
+			"  color: #ffffff !important;\n"
+			"  border-color: #1f6feb !important;\n"
+			"}\n"
+			"\n"
+			"button.inactive {\n"
+			"  background-color: #21262d !important;\n"
+			"  color: #8b949e !important;\n"
+			"  border-color: #30363d !important;\n"
+			"}\n"
+			"\n"
+			"button.inactive:hover {\n"
+			"  border-color: #58a6ff !important;\n"
+			"  color: #c9d1d9 !important;\n"
+			"}\n"
+			"\n"
+			"/* Status labels */\n"
+			".status-label {\n"
+			"  color: #8b949e;\n"
+			"  font-size: 13px;\n"
+			"}\n"
+			"\n"
+			".status-value {\n"
+			"  color: #c9d1d9;\n"
+			"  font-weight: 600;\n"
+			"  font-size: 14px;\n"
+			"}\n"
+			"\n"
+			".status-value.on {\n"
+			"  color: #3fb950;\n"
+			"}\n"
+			"\n"
+			".status-value.off {\n"
+			"  color: #f85149;\n"
+			"}\n"
+			"\n"
+			".status-value.max {\n"
+			"  color: #d29922;\n"
+			"}\n"
+			"\n"
+			".status-value.auto {\n"
+			"  color: #58a6ff;\n"
+			"}\n"
+			"\n"
+			"/* Fan speed display */\n"
+			".fan-speed {\n"
+			"  background-color: #0d1117;\n"
+			"  border: 1px solid #21262d;\n"
+			"  border-radius: 6px;\n"
+			"  padding: 12px 16px;\n"
+			"  margin: 4px 0;\n"
+			"}\n"
+			"\n"
+			".fan-speed-label {\n"
+			"  color: #8b949e;\n"
+			"  font-size: 12px;\n"
+			"  font-weight: 500;\n"
+			"}\n"
+			"\n"
+			".fan-speed-value {\n"
+			"  color: #c9d1d9;\n"
+			"  font-size: 18px;\n"
+			"  font-weight: 700;\n"
+			"  font-family: monospace;\n"
+			"}\n"
+			"";
 
-		GtkWidget *label_keyboard = gtk_label_new("Keyboard");
-		GtkWidget *label_fan = gtk_label_new("FAN");
-
-		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), keyboard_page, label_keyboard);
-		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), fan_page, label_fan);
+		gtk_css_provider_load_from_string(provider, css);
+		gtk_style_context_add_provider_for_display(
+			gdk_display_get_default(),
+			GTK_STYLE_PROVIDER(provider),
+			GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+		g_object_unref(provider);
 	}
 
-	void add_menu()
+	void build_ui()
 	{
-		GtkWidget *header_bar = gtk_header_bar_new();
-		gtk_window_set_titlebar(GTK_WINDOW(window), header_bar);
+		// Keyboard section
+		GtkWidget *keyboard_page = keyboard_control->get_page();
+		gtk_box_append(GTK_BOX(content_area), keyboard_page);
 
-		GtkWidget *title_label = gtk_label_new("victus-control");
-		gtk_header_bar_set_title_widget(GTK_HEADER_BAR(header_bar), title_label);
-
-		menu_button = gtk_menu_button_new();
-		gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button), "open-menu-symbolic");
-		gtk_header_bar_pack_end(GTK_HEADER_BAR(header_bar), menu_button);
-
-		menu = gtk_popover_new();
-		GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-		GtkWidget *about_button = gtk_button_new_with_label("About victus-control");
-		g_signal_connect(about_button, "clicked", G_CALLBACK(on_about_clicked), this);
-
-		gtk_box_append(GTK_BOX(menu_box), about_button);
-		gtk_popover_set_child(GTK_POPOVER(menu), menu_box);
-		gtk_menu_button_set_popover(GTK_MENU_BUTTON(menu_button), menu);
-
-		gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(header_bar), TRUE);
+		// Fan section
+		GtkWidget *fan_page = fan_control->get_page();
+		gtk_box_append(GTK_BOX(content_area), fan_page);
 	}
 
 	void run()
@@ -97,14 +264,6 @@ public:
 
 		g_main_loop_unref(loop);
 	}
-
-private:
-	static void on_about_clicked(GtkButton *button, gpointer user_data)
-	{
-		VictusControl *self = static_cast<VictusControl *>(user_data);
-
-		self->about.show_about_window(GTK_WINDOW(self->window));
-	}
 };
 
 int main(int argc, char *argv[])
@@ -116,27 +275,13 @@ int main(int argc, char *argv[])
 		app.run();
 	} catch (const std::exception &e) {
 		std::cerr << "An unhandled exception occurred: " << e.what() << std::endl;
-		GtkWidget *error_dialog = gtk_message_dialog_new(
-			nullptr,
-			GTK_DIALOG_DESTROY_WITH_PARENT,
-			GTK_MESSAGE_ERROR,
-			GTK_BUTTONS_CLOSE,
+
+		GtkAlertDialog *dialog = gtk_alert_dialog_new(
 			"An error occurred: %s",
 			e.what()
 		);
-		gtk_window_set_title(GTK_WINDOW(error_dialog), "Error");
-		GMainLoop *loop = g_main_loop_new(nullptr, FALSE);
-		g_signal_connect(error_dialog, "response", G_CALLBACK(+[](GtkDialog *dialog, int, gpointer user_data) {
-			g_main_loop_quit(static_cast<GMainLoop *>(user_data));
-			gtk_window_destroy(GTK_WINDOW(dialog));
-		}), loop);
-		g_signal_connect(error_dialog, "close-request", G_CALLBACK(+[](GtkWidget *, gpointer user_data) {
-			g_main_loop_quit(static_cast<GMainLoop *>(user_data));
-			return FALSE;
-		}), loop);
-		gtk_widget_set_visible(error_dialog, true);
-		g_main_loop_run(loop);
-		g_main_loop_unref(loop);
+		gtk_alert_dialog_set_detail(dialog, "victus-control encountered an unexpected error and must close.");
+		gtk_alert_dialog_show(dialog, nullptr);
 		return 1;
 	}
 
