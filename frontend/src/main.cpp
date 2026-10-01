@@ -7,6 +7,7 @@
 #include <gtk/gtk.h>
 #include "keyboard.hpp"
 #include "fan.hpp"
+#include "sensors.hpp"
 #include "socket.hpp"
 
 class VictusControl
@@ -19,6 +20,7 @@ public:
 	std::shared_ptr<VictusSocketClient> socket_client;
 	std::unique_ptr<VictusFanControl> fan_control;
 	std::unique_ptr<VictusKeyboardControl> keyboard_control;
+	std::unique_ptr<VictusSensorControl> sensor_control;
 
 	bool is_dark_theme = false;
 	GtkCssProvider *css_provider = nullptr;
@@ -32,6 +34,7 @@ public:
 		socket_client = std::make_shared<VictusSocketClient>("/run/victus-control/victus_backend.sock");
 		fan_control = std::make_unique<VictusFanControl>(socket_client);
 		keyboard_control = std::make_unique<VictusKeyboardControl>(socket_client);
+		sensor_control = std::make_unique<VictusSensorControl>(socket_client);
 
 		window = gtk_window_new();
 		gtk_window_set_title(GTK_WINDOW(window), "victus-control");
@@ -137,7 +140,14 @@ public:
 			".status-value.auto { color: #0969da; }\n"
 			".fan-speed { background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; padding: 12px 16px; margin: 4px 0; }\n"
 			".fan-speed-label { color: #656d76; font-size: 12px; font-weight: 500; }\n"
-			".fan-speed-value { color: #1f2328; font-size: 18px; font-weight: 700; font-family: monospace; }\n";
+			".fan-speed-value { color: #1f2328; font-size: 18px; font-weight: 700; font-family: monospace; }\n"
+			".sensor-tile { background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 8px; padding: 10px 14px; }\n"
+			".sensor-dot { color: #0969da; font-size: 9px; }\n"
+			".sensor-name { color: #656d76; font-size: 13px; font-weight: 500; }\n"
+			".sensor-value { font-size: 18px; font-weight: 700; font-family: monospace; }\n"
+			".sensor-value.cool { color: #1a7f37; }\n"
+			".sensor-value.warm { color: #9a6700; }\n"
+			".sensor-value.hot { color: #cf222e; }\n";
 
 		const char *dark_css =
 			"* { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }\n"
@@ -162,7 +172,14 @@ public:
 			".status-value.auto { color: #58a6ff; }\n"
 			".fan-speed { background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 12px 16px; margin: 4px 0; }\n"
 			".fan-speed-label { color: #8b949e; font-size: 12px; font-weight: 500; }\n"
-			".fan-speed-value { color: #c9d1d9; font-size: 18px; font-weight: 700; font-family: monospace; }\n";
+			".fan-speed-value { color: #c9d1d9; font-size: 18px; font-weight: 700; font-family: monospace; }\n"
+			".sensor-tile { background-color: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 10px 14px; }\n"
+			".sensor-dot { color: #58a6ff; font-size: 9px; }\n"
+			".sensor-name { color: #8b949e; font-size: 13px; font-weight: 500; }\n"
+			".sensor-value { font-size: 18px; font-weight: 700; font-family: monospace; }\n"
+			".sensor-value.cool { color: #3fb950; }\n"
+			".sensor-value.warm { color: #d29922; }\n"
+			".sensor-value.hot { color: #f85149; }\n";
 
 		const char *css = dark ? dark_css : light_css;
 		gtk_css_provider_load_from_string(css_provider, css);
@@ -201,6 +218,10 @@ public:
 		// Fan section
 		GtkWidget *fan_page = fan_control->get_page();
 		gtk_box_append(GTK_BOX(content_area), fan_page);
+
+		// Sensors section
+		GtkWidget *sensors_page = sensor_control->get_page();
+		gtk_box_append(GTK_BOX(content_area), sensors_page);
 	}
 
 	void run()

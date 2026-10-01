@@ -1,5 +1,5 @@
 executable('victus-backend',
-  sources: ['src/fan.cpp', 'src/fan.hpp', 'src/keyboard.cpp', 'src/keyboard.hpp', 'src/main.cpp', 'src/util.cpp', 'src/util.hpp', 'src/validation.cpp', 'src/validation.hpp'],
+  sources: ['src/fan.cpp', 'src/fan.hpp', 'src/keyboard.cpp', 'src/keyboard.hpp', 'src/main.cpp', 'src/sensors.cpp', 'src/sensors.hpp', 'src/util.cpp', 'src/util.hpp', 'src/validation.cpp', 'src/validation.hpp'],
   dependencies: [dependency('threads')],
   install: true,
   install_dir: get_option('bindir'))

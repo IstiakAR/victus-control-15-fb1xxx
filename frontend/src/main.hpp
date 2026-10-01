@@ -4,6 +4,7 @@
 
 #include "fan.hpp"
 #include "keyboard.hpp"
+#include "sensors.hpp"
 #include "socket.hpp"
 
 class VictusControl
@@ -16,6 +17,7 @@ public:
 	std::shared_ptr<VictusSocketClient> socket_client;
 	std::unique_ptr<VictusFanControl> fan_control;
 	std::unique_ptr<VictusKeyboardControl> keyboard_control;
+	std::unique_ptr<VictusSensorControl> sensor_control;
 
 	VictusControl();
 	~VictusControl();

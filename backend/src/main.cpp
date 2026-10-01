@@ -14,6 +14,7 @@
 
 #include "fan.hpp"
 #include "keyboard.hpp"
+#include "sensors.hpp"
 #include "validation.hpp"
 
 #define SOCKET_DIR "/run/victus-control"
@@ -232,6 +233,12 @@ void handle_command(const std::string &command_str, int client_socket) {
       response = get_keyboard_type();
     } else {
       response = "ERROR: Invalid GET_KEYBOARD_TYPE command format";
+    }
+  } else if (command == "GET_TEMPERATURES") {
+    if (!has_extra_tokens(ss)) {
+      response = get_temperatures();
+    } else {
+      response = "ERROR: Invalid GET_TEMPERATURES command format";
     }
   } else if (command == "GET_KBD_BRIGHTNESS") {
     if (!has_extra_tokens(ss)) {
