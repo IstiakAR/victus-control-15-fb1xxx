@@ -29,12 +29,14 @@ VictusFanControl::VictusFanControl(std::shared_ptr<VictusSocketClient> client) :
     // Auto button
     auto_btn = gtk_button_new_with_label("AUTO");
     gtk_widget_add_css_class(auto_btn, "active");
+    gtk_widget_set_cursor_from_name(auto_btn, "pointer");
     g_signal_connect(auto_btn, "clicked", G_CALLBACK(on_auto_clicked), this);
     gtk_box_append(GTK_BOX(btn_row), auto_btn);
 
     // Max button
     max_btn = gtk_button_new_with_label("MAX");
     gtk_widget_add_css_class(max_btn, "inactive");
+    gtk_widget_set_cursor_from_name(max_btn, "pointer");
     g_signal_connect(max_btn, "clicked", G_CALLBACK(on_max_clicked), this);
     gtk_box_append(GTK_BOX(btn_row), max_btn);
     gtk_box_append(GTK_BOX(mode_card), btn_row);

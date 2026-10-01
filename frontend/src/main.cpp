@@ -55,11 +55,7 @@ public:
 		gtk_widget_set_size_request(theme_btn, 40, 40);
 		gtk_button_set_label(GTK_BUTTON(theme_btn), "☀");
 		gtk_widget_add_css_class(theme_btn, "victus-title-btn");
-		g_signal_connect(theme_btn, "realize", G_CALLBACK(+[](GtkWidget *w, gpointer)
-		{
-			GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(w));
-			if (surface) gdk_surface_set_cursor(surface, gdk_cursor_new_from_name("pointer", nullptr));
-		}), nullptr);
+		gtk_widget_set_cursor_from_name(theme_btn, "pointer");
 		g_signal_connect(theme_btn, "clicked", G_CALLBACK(+[](GtkWidget *btn, gpointer data)
 		{
 			VictusControl *self = static_cast<VictusControl*>(data);
@@ -82,11 +78,7 @@ public:
 		gtk_widget_set_size_request(close_btn, 32, 32);
 		gtk_button_set_icon_name(GTK_BUTTON(close_btn), "window-close-symbolic");
 		gtk_widget_add_css_class(close_btn, "victus-title-btn");
-		g_signal_connect(close_btn, "realize", G_CALLBACK(+[](GtkWidget *w, gpointer)
-		{
-			GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(w));
-			if (surface) gdk_surface_set_cursor(surface, gdk_cursor_new_from_name("pointer", nullptr));
-		}), nullptr);
+		gtk_widget_set_cursor_from_name(close_btn, "pointer");
 		g_signal_connect_swapped(close_btn, "clicked", G_CALLBACK(gtk_window_destroy), window);
 		gtk_box_append(GTK_BOX(title_bar), close_btn);
 
